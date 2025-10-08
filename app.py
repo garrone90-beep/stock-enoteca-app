@@ -15,7 +15,7 @@ COL_MAP_ENV = os.getenv("COL_MAP", "")
 
 st.set_page_config(page_title="Stock Enoteca", page_icon="🍷", layout="wide")
 
-# ---- Tiny CSS for badges & sticky bar ----
+# ---- CSS (badges, sticky, cards, grid per valori incolonnati) ----
 st.markdown(
     """
     <style>
@@ -26,6 +26,11 @@ st.markdown(
       .sticky {position:sticky; top:0; z-index:999; backdrop-filter: blur(6px); background:rgba(255,255,255,0.8); padding:8px 0 2px 0; margin-bottom:8px; border-bottom: 1px solid #eee}
       .card {border:1px solid #eee;border-radius:14px;padding:12px;margin-bottom:10px}
       .muted{color:#6b7280}
+      .kv {display:grid; grid-template-columns: 140px 1fr; column-gap: 8px; row-gap: 6px; margin-top:6px}
+      .k {color:#6b7280}
+      .v {font-weight:600}
+      .card-head {display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
+      .price {font-variant-numeric: tabular-nums;}
     </style>
     """,
     unsafe_allow_html=True,
@@ -68,6 +73,7 @@ def load_csv(url: str) -> pd.DataFrame:
             text = content.decode("utf-8")
         except UnicodeDecodeError:
             text = content.decode("latin1")
+        # Prima prova con separatore ';' e decimali ','
         try:
             df = pd.read_csv(io.StringIO(text), sep=";", decimal=",")
         except Exception:
@@ -77,6 +83,28 @@ def load_csv(url: str) -> pd.DataFrame:
         st.error(f"Errore nel caricamento CSV: {e}")
         return pd.DataFrame()
 
+def _to_price_eu(series: pd.Series) -> pd.Series:
+    import pandas.api.types as ptypes
+    s = series
+    if ptypes.is_numeric_dtype(s):
+        return s
+    s = s.astype(str).str.strip()
+    s = (s
+         .str.replace('€', '', regex=False)
+         .str.replace('EUR', '', regex=False)
+         .str.replace(' ', '', regex=False)
+    )
+    s = s.str.replace(r'\.(?=\d{3}(\D|$))', '', regex=True)
+    s = s.str.replace(',', '.', regex=False)
+    return pd.to_numeric(s, errors='coerce')
+
+def _fmt_eur(v) -> str:
+    if pd.isna(v):
+        return ""
+    try:
+        return f"{float(v):.2f}".replace('.', ',') + "€"
+    except Exception:
+        return ""
 
 def normalize_columns(df: pd.DataFrame, col_map: dict) -> pd.DataFrame:
     if df.empty:
@@ -118,15 +146,10 @@ def normalize_columns(df: pd.DataFrame, col_map: dict) -> pd.DataFrame:
     else:
         df["stock_attuale"] = 0
 
+    # Prezzi robusti EU
     for price_col in ["prezzo_vendita", "prezzo_ingrosso"]:
         if price_col in df.columns:
-            df[price_col] = (
-                df[price_col]
-                .astype(str)
-                .str.replace(".", "", regex=False)
-                .str.replace(",", ".", regex=False)
-            )
-            df[price_col] = pd.to_numeric(df[price_col], errors="coerce")
+            df[price_col] = _to_price_eu(df[price_col])
 
     df["disponibile"] = df["stock_attuale"] > 0
     df.sort_values(by=["disponibile", "descrizione"], ascending=[False, True], inplace=True)
@@ -136,7 +159,6 @@ def normalize_columns(df: pd.DataFrame, col_map: dict) -> pd.DataFrame:
         "stock_attuale", "prezzo_vendita", "prezzo_ingrosso", "disponibile"
     ] if c in df.columns]
     return df[cols_out]
-
 
 def apply_filters(df: pd.DataFrame, q: str, only_avail: bool, low_stock: bool,
                   forn: list, prod: list, ann: list) -> pd.DataFrame:
@@ -164,7 +186,9 @@ def apply_filters(df: pd.DataFrame, q: str, only_avail: bool, low_stock: bool,
         res = res[res["annata"].isin(ann)]
     return res
 
-
+# =========================
+# LOAD DATA
+# =========================
 col_map = {}
 if col_map_text.strip():
     try:
@@ -186,6 +210,9 @@ if df.empty:
     st.info("Carica un URL CSV valido per iniziare.")
     st.stop()
 
+# =========================
+# STICKY BAR: Ricerca + Quick filters
+# =========================
 st.markdown('<div class="sticky">', unsafe_allow_html=True)
 col_a, col_b, col_c, col_d = st.columns([4, 2, 2, 2])
 with col_a:
@@ -198,6 +225,7 @@ with col_d:
     view_mode = st.radio("Vista", ["Cards", "Tabella"], horizontal=True, label_visibility="visible")
 st.markdown('</div>', unsafe_allow_html=True)
 
+# Filtri secondari
 cols = st.columns(3)
 with cols[0]:
     forn_opts = sorted([f for f in df.get("fornitore", pd.Series(dtype=str)).dropna().unique() if str(f).strip()])
@@ -215,12 +243,18 @@ with cols[2]:
 
 filtered = apply_filters(df, q, only_avail, low_stock, forn_sel, prod_sel, ann_sel)
 
+# =========================
+# KPI
+# =========================
 colk = st.columns(3)
 colk[0].metric("Articoli trovati", f"{len(filtered):,}".replace(",", "."))
 colk[1].metric("Disponibili", f"{filtered['disponibile'].sum():,}".replace(",", "."))
 if "stock_attuale" in filtered.columns:
     colk[2].metric("Pezzi totali (filtro)", f"{int(filtered['stock_attuale'].sum()):,}".replace(",", "."))
 
+# =========================
+# RENDER: Cards o Tabella
+# =========================
 if view_mode == "Cards":
     for _, r in filtered.iterrows():
         disp = "✅ Disponibile" if r.get("disponibile", False) else "❌ Esaurito"
@@ -228,20 +262,31 @@ if view_mode == "Cards":
         if "stock_attuale" in r and r["stock_attuale"] <= 2 and r.get("disponibile", False):
             disp = "⚠️ Sottoscorta"
             badge_class = "warn"
-        prezzo = r.get("prezzo_vendita", None)
-        prezzo_txt = f" – {prezzo:.2f}€" if pd.notna(prezzo) else ""
+
+        prezzo_v = r.get("prezzo_vendita", None)
+        prezzo_i = r.get("prezzo_ingrosso", None)
+        prezzo_v_txt = _fmt_eur(prezzo_v)
+        prezzo_i_txt = _fmt_eur(prezzo_i)
+
         st.markdown(
             f"""
             <div class='card'>
-              <div style='display:flex;justify-content:space-between;align-items:center;gap:12px;'>
+              <div class='card-head'>
                 <div>
-                  <strong>{r.get('descrizione','')}</strong><span class='muted'>{prezzo_txt}</span><br>
-                  <span class='muted'>Cod: {r.get('codice_prodotto','')} · Annata: {r.get('annata','')}</span><br>
-                  <span class='muted'>Produttore: {r.get('produttore','')} · Fornitore: {r.get('fornitore','')}</span>
+                  <strong>{r.get('descrizione','')}</strong>
                 </div>
                 <div><span class='badge {badge_class}'>{disp}</span></div>
               </div>
-              <div class='muted' style='margin-top:6px;'>Qta: <strong>{int(r.get('stock_attuale',0))}</strong></div>
+
+              <div class='kv'>
+                <div class='k'>Prezzo dettaglio</div><div class='v price'>{prezzo_v_txt}</div>
+                <div class='k'>Prezzo ingrosso</div><div class='v price'>{prezzo_i_txt}</div>
+                <div class='k'>Codice</div><div class='v'>{r.get('codice_prodotto','')}</div>
+                <div class='k'>Annata</div><div class='v'>{r.get('annata','')}</div>
+                <div class='k'>Produttore</div><div class='v'>{r.get('produttore','')}</div>
+                <div class='k'>Fornitore</div><div class='v'>{r.get('fornitore','')}</div>
+                <div class='k'>Quantità</div><div class='v'>{int(r.get('stock_attuale',0))}</div>
+              </div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -269,8 +314,14 @@ else:
 
     st.dataframe(styler, use_container_width=True, hide_index=True)
 
+# =========================
+# DOWNLOAD filtrato
+# =========================
 csv_bytes = filtered.to_csv(index=False).encode("utf-8")
 st.download_button("⬇️ Scarica risultato (CSV)", data=csv_bytes, file_name="stock_filtrato.csv", mime="text/csv")
 
+# =========================
+# AUTO REFRESH
+# =========================
 if auto_refresh:
     st.caption("Auto-refresh attivo (5 min)")
