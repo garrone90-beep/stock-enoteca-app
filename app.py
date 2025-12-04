@@ -7,6 +7,18 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 
+def download_from_dropbox(path: str) -> bytes:
+    """Scarica un file da Dropbox e restituisce il contenuto grezzo (bytes)."""
+    url = "https://content.dropboxapi.com/2/files/download"
+    headers = {
+        "Authorization": f"Bearer {st.secrets['DROPBOX_TOKEN']}",
+        "Dropbox-API-Arg": json.dumps({"path": path}),
+    }
+
+    r = requests.post(url, headers=headers, timeout=30)
+    r.raise_for_status()
+    return r.content
+
 # =========================
 # CONFIG
 # =========================
@@ -63,16 +75,22 @@ with st.sidebar:
 # =========================
 @st.cache_data(ttl=300)
 def load_csv(url: str) -> pd.DataFrame:
-    if not url:
+    """
+    Carica il CSV dallo stock su Dropbox usando l'API e il token.
+    Il parametro `url` viene ignorato: la sorgente reale è DROPBOX_STOCK_PATH nei secrets.
+    """
+    dropbox_path = st.secrets.get("DROPBOX_STOCK_PATH", "")
+    if not dropbox_path:
+        st.error("Config mancante: aggiungi DROPBOX_STOCK_PATH nei secrets di Streamlit.")
         return pd.DataFrame()
+
     try:
-        r = requests.get(url, timeout=20)
-        r.raise_for_status()
-        content = r.content
+        content = download_from_dropbox(dropbox_path)
         try:
             text = content.decode("utf-8")
         except UnicodeDecodeError:
             text = content.decode("latin1")
+
         # Prima prova con separatore ';' e decimali ','
         try:
             df = pd.read_csv(io.StringIO(text), sep=";", decimal=",")
@@ -80,8 +98,9 @@ def load_csv(url: str) -> pd.DataFrame:
             df = pd.read_csv(io.StringIO(text))
         return df
     except Exception as e:
-        st.error(f"Errore nel caricamento CSV: {e}")
+        st.error(f"Errore nel caricamento CSV da Dropbox: {e}")
         return pd.DataFrame()
+
 
 def _to_price_eu(series: pd.Series) -> pd.Series:
     import pandas.api.types as ptypes
