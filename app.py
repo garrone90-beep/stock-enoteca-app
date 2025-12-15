@@ -8,16 +8,31 @@ import numpy as np
 import streamlit as st
 
 def download_from_dropbox(path: str) -> bytes:
-    """Scarica un file da Dropbox e restituisce il contenuto grezzo (bytes)."""
     url = "https://content.dropboxapi.com/2/files/download"
+
+    token = st.secrets.get("DROPBOX_TOKEN", "")
+    if not token:
+        raise RuntimeError("Manca DROPBOX_TOKEN nei secrets")
+
+    if not path or not isinstance(path, str):
+        raise RuntimeError(f"DROPBOX_STOCK_PATH non valido: {path!r}")
+
+    # pulizia base: elimina spazi/a-capo accidentali
+    path = path.strip()
+
     headers = {
-        "Authorization": f"Bearer {st.secrets['DROPBOX_TOKEN']}",
+        "Authorization": f"Bearer {token.strip()}",
         "Dropbox-API-Arg": json.dumps({"path": path}),
     }
 
     r = requests.post(url, headers=headers, timeout=30)
-    r.raise_for_status()
+
+    if r.status_code != 200:
+        st.error(f"Dropbox {r.status_code}: {r.text}")
+        r.raise_for_status()
+
     return r.content
+
 
 # =========================
 # CONFIG
