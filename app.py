@@ -7,30 +7,29 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 
+@st.cache_data(ttl=60 * 30)  # 30 minuti di cache (l'access token dura ore)
+def get_dropbox_access_token() -> str:
+    url = "https://api.dropboxapi.com/oauth2/token"
+    data = {
+        "grant_type": "refresh_token",
+        "refresh_token": st.secrets["DROPBOX_REFRESH_TOKEN"],
+        "client_id": st.secrets["DROPBOX_APP_KEY"],
+        "client_secret": st.secrets["DROPBOX_APP_SECRET"],
+    }
+    r = requests.post(url, data=data, timeout=30)
+    r.raise_for_status()
+    return r.json()["access_token"]
+
 def download_from_dropbox(path: str) -> bytes:
     url = "https://content.dropboxapi.com/2/files/download"
-
-    token = st.secrets.get("DROPBOX_TOKEN", "")
-    if not token:
-        raise RuntimeError("Manca DROPBOX_TOKEN nei secrets")
-
-    if not path or not isinstance(path, str):
-        raise RuntimeError(f"DROPBOX_STOCK_PATH non valido: {path!r}")
-
-    # pulizia base: elimina spazi/a-capo accidentali
-    path = path.strip()
+    access_token = get_dropbox_access_token()
 
     headers = {
-        "Authorization": f"Bearer {token.strip()}",
-        "Dropbox-API-Arg": json.dumps({"path": path}),
+        "Authorization": f"Bearer {access_token}",
+        "Dropbox-API-Arg": json.dumps({"path": path.strip()}),
     }
-
     r = requests.post(url, headers=headers, timeout=30)
-
-    if r.status_code != 200:
-        st.error(f"Dropbox {r.status_code}: {r.text}")
-        r.raise_for_status()
-
+    r.raise_for_status()
     return r.content
 
 
@@ -89,32 +88,24 @@ with st.sidebar:
 # FUNZIONI
 # =========================
 @st.cache_data(ttl=300)
-def load_csv(url: str) -> pd.DataFrame:
-    """
-    Carica il CSV dallo stock su Dropbox usando l'API e il token.
-    Il parametro `url` viene ignorato: la sorgente reale è DROPBOX_STOCK_PATH nei secrets.
-    """
+def load_csv(_ignored_url: str) -> pd.DataFrame:
     dropbox_path = st.secrets.get("DROPBOX_STOCK_PATH", "")
     if not dropbox_path:
         st.error("Config mancante: aggiungi DROPBOX_STOCK_PATH nei secrets di Streamlit.")
         return pd.DataFrame()
 
-    try:
-        content = download_from_dropbox(dropbox_path)
-        try:
-            text = content.decode("utf-8")
-        except UnicodeDecodeError:
-            text = content.decode("latin1")
+    content = download_from_dropbox(dropbox_path)
 
-        # Prima prova con separatore ';' e decimali ','
-        try:
-            df = pd.read_csv(io.StringIO(text), sep=";", decimal=",")
-        except Exception:
-            df = pd.read_csv(io.StringIO(text))
-        return df
-    except Exception as e:
-        st.error(f"Errore nel caricamento CSV da Dropbox: {e}")
-        return pd.DataFrame()
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError:
+        text = content.decode("latin1")
+
+    try:
+        df = pd.read_csv(io.StringIO(text), sep=";", decimal=",")
+    except Exception:
+        df = pd.read_csv(io.StringIO(text))
+    return df
 
 
 def _to_price_eu(series: pd.Series) -> pd.Series:
