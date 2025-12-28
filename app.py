@@ -6,6 +6,9 @@ import requests
 import pandas as pd
 import numpy as np
 import streamlit as st
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+
 
 @st.cache_data(ttl=60 * 30)  # 30 minuti di cache (l'access token dura ore)
 def get_dropbox_access_token() -> str:
@@ -211,6 +214,34 @@ def apply_filters(df: pd.DataFrame, q: str, only_avail: bool, low_stock: bool,
         res = res[res["annata"].isin(ann)]
     return res
 
+@st.cache_data(ttl=60)  # aggiorna al massimo ogni minuto
+def get_dropbox_file_modified(path: str) -> datetime:
+    """
+    Ritorna la data/ora di ultima modifica del file su Dropbox (server_modified).
+    """
+    url = "https://api.dropboxapi.com/2/files/get_metadata"
+    access_token = get_dropbox_access_token()
+
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+    }
+    payload = {"path": path.strip()}
+
+    r = requests.post(url, headers=headers, json=payload, timeout=30)
+    r.raise_for_status()
+    data = r.json()
+
+    # Esempio: "2025-12-28T18:32:11Z"
+    ts = data.get("server_modified")
+    if not ts:
+        raise RuntimeError("Metadato 'server_modified' non disponibile per questo file.")
+
+    # Parse ISO 8601 con Z finale
+    dt_utc = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    return dt_utc
+
+
 # =========================
 # LOAD DATA
 # =========================
@@ -234,6 +265,32 @@ df = normalize_columns(df_raw, col_map)
 if df.empty:
     st.info("Carica un URL CSV valido per iniziare.")
     st.stop()
+
+# =========================
+# DATA FRESHNESS (Dropbox metadata)
+# =========================
+try:
+    modified_utc = get_dropbox_file_modified(st.secrets["DROPBOX_STOCK_PATH"])
+    tz = ZoneInfo("Europe/Rome")
+    modified_local = modified_utc.astimezone(tz)
+
+    now_local = datetime.now(tz)
+    age_seconds = max(0, int((now_local - modified_local).total_seconds()))
+
+    if age_seconds < 60:
+        age_txt = f"{age_seconds}s fa"
+    elif age_seconds < 3600:
+        age_txt = f"{age_seconds // 60} min fa"
+    elif age_seconds < 86400:
+        age_txt = f"{age_seconds // 3600} ore fa"
+    else:
+        age_txt = f"{age_seconds // 86400} giorni fa"
+
+    st.caption(f"🕒 Dati aggiornati al: **{modified_local.strftime('%d/%m/%Y %H:%M:%S')}** (≈ {age_txt})")
+
+except Exception as e:
+    st.warning(f"Impossibile leggere la data di aggiornamento del file: {e}")
+
 
 # =========================
 # STICKY BAR: Ricerca + Quick filters
